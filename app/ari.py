@@ -1,4 +1,3 @@
-import itertools
 import json
 import logging
 from pathlib import Path
@@ -42,7 +41,9 @@ def _load_model():
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         quantization_config = OVWeightQuantizationConfig(bits=8, ratio=1.0)
         ov_model = OVModelForSequenceClassification.from_pretrained(
-            model_path, export=True, compile=True,
+            model_path,
+            export=True,
+            compile=True,
             quantization_config=quantization_config,
         )
 
@@ -56,39 +57,29 @@ def preprocess_data(filexaif, wnd_size):
     idents = []
     idents_comb = []
     propositions = {}
-    data = {'text': [], 'text2': []}
+    data = {"text": [], "text2": []}
 
-    for node in filexaif['nodes']:
-        if node['type'] == 'I':
-            propositions[node['nodeID']] = node['text']
-            idents.append(node['nodeID'])
+    for node in filexaif["nodes"]:
+        if node["type"] == "I":
+            propositions[node["nodeID"]] = node["text"]
+            idents.append(node["nodeID"])
 
     if wnd_size == -1:
         window_size = len(idents)
+    elif wnd_size < 2:
+        return Dataset.from_dict(data), idents_comb, propositions
     else:
-        window_size = wnd_size
-    for i in range(len(idents) - window_size + 1):
-        context = idents[i: i + window_size]
+        window_size = min(wnd_size, len(idents))
 
-        if window_size == 2:
-            for p in itertools.combinations(context, 2):
-                idents_comb.append(p)
-                data['text'].append(propositions[p[0]])
-                data['text2'].append(propositions[p[1]])
-
-        else:
-            if i == 0:
-                c = 1
-            else:
-                c = 0
-            for p in itertools.combinations(context, 2):
-                if c == 0:
-                    pass
-                else:
-                    idents_comb.append(p)
-                    data['text'].append(propositions[p[0]])
-                    data['text2'].append(propositions[p[1]])
-                c += 1
+    # Pair each proposition with later propositions that still fall within the
+    # requested window so every eligible pair is emitted exactly once.
+    for left in range(len(idents) - 1):
+        right_end = min(len(idents), left + window_size)
+        for right in range(left + 1, right_end):
+            pair = (idents[left], idents[right])
+            idents_comb.append(pair)
+            data["text"].append(propositions[pair[0]])
+            data["text2"].append(propositions[pair[1]])
 
     final_data = Dataset.from_dict(data)
 
@@ -96,24 +87,26 @@ def preprocess_data(filexaif, wnd_size):
 
 
 def tokenize_sequence(samples):
-    return TOKENIZER(samples["text"], samples["text2"], padding="max_length", truncation=True)
+    return TOKENIZER(
+        samples["text"], samples["text2"], padding="max_length", truncation=True
+    )
 
 
 def pipeline_predictions(pipeline, data):
     labels = []
     pipeline_input = []
-    for i in range(len(data['text'])):
-        sample = data['text'][i]+'. '+data['text2'][i]
+    for i in range(len(data["text"])):
+        sample = data["text"][i] + ". " + data["text2"][i]
         pipeline_input.append(sample)
 
     outputs = pipeline(pipeline_input, batch_size=32, truncation=True)
     for out in outputs:
         out = out[0] if isinstance(out, list) else out
-        if out['label'] == 'Inference' and out['score'] > 0.9:
+        if out["label"] == "Inference" and out["score"] > 0.9:
             labels.append(1)
-        elif out['label'] == 'Conflict' and out['score'] > 0.8:
+        elif out["label"] == "Conflict" and out["score"] > 0.8:
             labels.append(2)
-        elif out['label'] == 'Rephrase' and out['score'] > 0.8:
+        elif out["label"] == "Rephrase" and out["score"] > 0.8:
             labels.append(3)
         else:
             labels.append(0)
@@ -132,24 +125,29 @@ def output_xaif(idents, labels, fileaif):
 
         elif lb == 1:
             # Add the RA node
-            original_aif.add_component("argument_relation", "RA", idents[i][1], idents[i][0])
+            original_aif.add_component(
+                "argument_relation", "RA", idents[i][1], idents[i][0]
+            )
 
         elif lb == 2:
             # Add the CA node
-            original_aif.add_component("argument_relation", "CA", idents[i][1], idents[i][0])
+            original_aif.add_component(
+                "argument_relation", "CA", idents[i][1], idents[i][0]
+            )
 
         elif lb == 3:
             # Add the MA node
-            original_aif.add_component("argument_relation", "MA", idents[i][1], idents[i][0])
+            original_aif.add_component(
+                "argument_relation", "MA", idents[i][1], idents[i][0]
+            )
 
     return original_aif.xaif
 
 
 def relation_identification(xaif, window_size):
-
     # Generate a HF Dataset from all the "I" node pairs to make predictions from the xAIF file
     # and a list of tuples with the corresponding "I" node ids to generate the final xaif file.
-    dataset, ids, props = preprocess_data(xaif['AIF'], window_size)
+    dataset, ids, _ = preprocess_data(xaif["AIF"], window_size)
 
     if len(dataset) == 0:
         logger.info("Fewer than 2 I-nodes; skipping ARI classification")
@@ -169,10 +167,9 @@ def relation_identification(xaif, window_size):
 
 # DEBUGGING:
 if __name__ == "__main__":
-    ff = open('../data.json', 'r')
+    ff = open("../data.json", "r")
     content = json.load(ff)
     # print(content)
     out = relation_identification(content, -1)
     with open("../data_out3.json", "w") as outfile:
         json.dump(out, outfile, indent=4)
-
