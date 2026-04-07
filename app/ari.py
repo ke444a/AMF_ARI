@@ -106,13 +106,14 @@ def pipeline_predictions(pipeline, data):
         sample = data['text'][i]+'. '+data['text2'][i]
         pipeline_input.append(sample)
 
-    outputs = pipeline(pipeline_input)
+    outputs = pipeline(pipeline_input, batch_size=32, truncation=True)
     for out in outputs:
+        out = out[0] if isinstance(out, list) else out
         if out['label'] == 'Inference' and out['score'] > 0.9:
             labels.append(1)
-        elif out['label'] == 'Conflict' and out['score'] > 0.7:
+        elif out['label'] == 'Conflict' and out['score'] > 0.8:
             labels.append(2)
-        elif out['label'] == 'Rephrase' and out['score'] > 0.7:
+        elif out['label'] == 'Rephrase' and out['score'] > 0.8:
             labels.append(3)
         else:
             labels.append(0)
@@ -146,9 +147,13 @@ def output_xaif(idents, labels, fileaif):
 
 def relation_identification(xaif, window_size):
 
-    # Generate a HF Dataset from all the "I" node pairs to make predictions from the xAIF file 
+    # Generate a HF Dataset from all the "I" node pairs to make predictions from the xAIF file
     # and a list of tuples with the corresponding "I" node ids to generate the final xaif file.
     dataset, ids, props = preprocess_data(xaif['AIF'], window_size)
+
+    if len(dataset) == 0:
+        logger.info("Fewer than 2 I-nodes; skipping ARI classification")
+        return xaif
 
     # Inference Pipeline
     pl = pipeline("text-classification", model=PRUNED_MODEL, tokenizer=TOKENIZER)
