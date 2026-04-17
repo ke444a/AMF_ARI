@@ -102,11 +102,11 @@ def pipeline_predictions(pipeline, data):
     outputs = pipeline(pipeline_input, batch_size=32, truncation=True)
     for out in outputs:
         out = out[0] if isinstance(out, list) else out
-        if out["label"] == "Inference" and out["score"] > 0.9:
+        if out["label"] == "Inference" and out["score"] >= 0.9:
             labels.append(1)
-        elif out["label"] == "Conflict" and out["score"] > 0.8:
+        elif out["label"] == "Conflict" and out["score"] >= 0.75:
             labels.append(2)
-        elif out["label"] == "Rephrase" and out["score"] > 0.8:
+        elif out["label"] == "Rephrase" and out["score"] >= 0.9:
             labels.append(3)
         else:
             labels.append(0)
