@@ -7,10 +7,7 @@ from app.ari import relation_identification
 @application.route("/", methods=["GET", "POST"])
 def amf_ari():
     if request.method == "POST":
-        f = request.files["file"]
-        f.save(f.filename)
-        with open(f.filename, "r") as ff:
-            content = json.load(ff)
+        content = json.load(request.files["file"].stream)
         # Predict existing relations in content (i.e., xaif file) "I" nodes.
         window_size_param = request.args.get("window_size")
         if window_size_param is None:
@@ -25,7 +22,6 @@ def amf_ari():
                 return jsonify({"error": "window_size must be -1 or >= 2"}), 400
 
         response = relation_identification(content, window_size=window_size)
-        print(response)
         return jsonify(response)
     elif request.method == "GET":
         return render_template("docs.html")

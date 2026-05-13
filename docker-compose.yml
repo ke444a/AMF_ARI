@@ -3,5 +3,6 @@ services:
     container_name: amf_ari
     platform: linux/amd64
     build: .
+    gpus: all
     ports:
       - "5001:5001"

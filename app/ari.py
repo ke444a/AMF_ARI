@@ -2,15 +2,19 @@ import json
 import logging
 from pathlib import Path
 
-from datasets import Dataset
-from transformers import AutoTokenizer, pipeline
-import numpy as np
-from optimum.intel import OVModelForSequenceClassification, OVWeightQuantizationConfig
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from xaif_eval import xaif
 
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "raruidol/ArgumentMining-EN-ARI-AIF-RoBERTa_L"
+BATCH_SIZE = 1024
+LABEL_THRESHOLDS = {
+    "Inference": (1, 0.9),
+    "Conflict": (2, 0.75),
+    "Rephrase": (3, 0.9),
+}
 
 
 def _load_config():
@@ -18,39 +22,28 @@ def _load_config():
     if config_path.exists():
         with config_path.open() as f:
             return json.load(f)
-    return {"model_path": MODEL_ID, "ov_model_path": None}
+    return {"model_path": MODEL_ID}
 
 
 def _load_model():
     config = _load_config()
     model_path = config.get("model_path", MODEL_ID)
-    ov_model_path = config.get("ov_model_path")
 
-    if ov_model_path:
-        logger.info("Loading pre-exported OpenVINO model from: %s", ov_model_path)
-        tokenizer = AutoTokenizer.from_pretrained(ov_model_path)
-        ov_model = OVModelForSequenceClassification.from_pretrained(
-            ov_model_path, export=False, compile=True
-        )
-    else:
-        logger.warning(
-            "'ov_model_path' is not set in config/config.json. "
-            "Falling back to exporting from PyTorch at runtime (slow). "
-            "Run the export script and set 'ov_model_path' to avoid this."
-        )
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        quantization_config = OVWeightQuantizationConfig(bits=8, ratio=1.0)
-        ov_model = OVModelForSequenceClassification.from_pretrained(
-            model_path,
-            export=True,
-            compile=True,
-            quantization_config=quantization_config,
-        )
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for AMF_ARI GPU inference")
 
-    return tokenizer, ov_model
+    logger.info("Loading CUDA model from: %s", model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+    ).to("cuda")
+    model.eval()
+
+    return tokenizer, model
 
 
-TOKENIZER, PRUNED_MODEL = _load_model()
+TOKENIZER, MODEL = _load_model()
 
 
 def preprocess_data(filexaif, wnd_size):
@@ -67,7 +60,7 @@ def preprocess_data(filexaif, wnd_size):
     if wnd_size == -1:
         window_size = len(idents)
     elif wnd_size < 2:
-        return Dataset.from_dict(data), idents_comb, propositions
+        return data, idents_comb, propositions
     else:
         window_size = min(wnd_size, len(idents))
 
@@ -81,35 +74,37 @@ def preprocess_data(filexaif, wnd_size):
             data["text"].append(propositions[pair[0]])
             data["text2"].append(propositions[pair[1]])
 
-    final_data = Dataset.from_dict(data)
-
-    return final_data, idents_comb, propositions
+    return data, idents_comb, propositions
 
 
-def tokenize_sequence(samples):
-    return TOKENIZER(
-        samples["text"], samples["text2"], padding="max_length", truncation=True
-    )
-
-
-def pipeline_predictions(pipeline, data):
+def model_predictions(data):
     labels = []
     pipeline_input = []
     for i in range(len(data["text"])):
         sample = data["text"][i] + ". " + data["text2"][i]
         pipeline_input.append(sample)
 
-    outputs = pipeline(pipeline_input, batch_size=32, truncation=True)
-    for out in outputs:
-        out = out[0] if isinstance(out, list) else out
-        if out["label"] == "Inference" and out["score"] >= 0.9:
-            labels.append(1)
-        elif out["label"] == "Conflict" and out["score"] >= 0.75:
-            labels.append(2)
-        elif out["label"] == "Rephrase" and out["score"] >= 0.9:
-            labels.append(3)
-        else:
-            labels.append(0)
+    id2label = MODEL.config.id2label
+    for start in range(0, len(pipeline_input), BATCH_SIZE):
+        batch = pipeline_input[start : start + BATCH_SIZE]
+        inputs = TOKENIZER(batch, padding=True, truncation=True, return_tensors="pt")
+        inputs = {
+            key: value.to("cuda", non_blocking=True)
+            for key, value in inputs.items()
+        }
+
+        with torch.inference_mode():
+            logits = MODEL(**inputs).logits
+            probabilities = torch.softmax(logits, dim=-1)
+            scores, label_ids = torch.max(probabilities, dim=-1)
+
+        for score, label_id in zip(scores.tolist(), label_ids.tolist()):
+            label = id2label[label_id]
+            mapped = LABEL_THRESHOLDS.get(label)
+            if mapped is not None and score >= mapped[1]:
+                labels.append(mapped[0])
+            else:
+                labels.append(0)
 
     return labels
 
@@ -145,19 +140,15 @@ def output_xaif(idents, labels, fileaif):
 
 
 def relation_identification(xaif, window_size):
-    # Generate a HF Dataset from all the "I" node pairs to make predictions from the xAIF file
-    # and a list of tuples with the corresponding "I" node ids to generate the final xaif file.
-    dataset, ids, _ = preprocess_data(xaif["AIF"], window_size)
+    # Generate proposition pairs and matching "I" node ids for the output xAIF.
+    data, ids, _ = preprocess_data(xaif["AIF"], window_size)
 
-    if len(dataset) == 0:
+    if len(data["text"]) == 0:
         logger.info("Fewer than 2 I-nodes; skipping ARI classification")
         return xaif
 
-    # Inference Pipeline
-    pl = pipeline("text-classification", model=PRUNED_MODEL, tokenizer=TOKENIZER)
-
     # Predict the list of labels for all the pairs of "I" nodes.
-    labels = pipeline_predictions(pl, dataset)
+    labels = model_predictions(data)
 
     # Prepare the xAIF output file.
     out_xaif = output_xaif(ids, labels, xaif)

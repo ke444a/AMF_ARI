@@ -1,4 +1,3 @@
 {
-    "model_path": "raruidol/ArgumentMining-EN-ARI-AIF-RoBERTa_L",
-    "ov_model_path": "arg-tech/amf-ari-roberta-ov-int8"
+    "model_path": "raruidol/ArgumentMining-EN-ARI-AIF-RoBERTa_L"
 }
