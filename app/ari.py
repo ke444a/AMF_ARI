@@ -9,7 +9,7 @@ from xaif_eval import xaif
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "raruidol/ArgumentMining-EN-ARI-AIF-RoBERTa_L"
-BATCH_SIZE = 1024
+BATCH_SIZE = 4096
 LABEL_THRESHOLDS = {
     "Inference": (1, 0.9),
     "Conflict": (2, 0.75),
