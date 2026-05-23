@@ -37,6 +37,7 @@ def _load_model():
     model = AutoModelForSequenceClassification.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
+        use_safetensors=True,
     ).to("cuda")
     model.eval()
 
@@ -79,15 +80,18 @@ def preprocess_data(filexaif, wnd_size):
 
 def model_predictions(data):
     labels = []
-    pipeline_input = []
-    for i in range(len(data["text"])):
-        sample = data["text"][i] + ". " + data["text2"][i]
-        pipeline_input.append(sample)
 
     id2label = MODEL.config.id2label
-    for start in range(0, len(pipeline_input), BATCH_SIZE):
-        batch = pipeline_input[start : start + BATCH_SIZE]
-        inputs = TOKENIZER(batch, padding=True, truncation=True, return_tensors="pt")
+    for start in range(0, len(data["text"]), BATCH_SIZE):
+        text_batch = data["text"][start : start + BATCH_SIZE]
+        text_pair_batch = data["text2"][start : start + BATCH_SIZE]
+        inputs = TOKENIZER(
+            text_batch,
+            text_pair_batch,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        )
         inputs = {
             key: value.to("cuda", non_blocking=True)
             for key, value in inputs.items()
